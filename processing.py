@@ -95,7 +95,7 @@ def build_vocabulary():
     return move_to_idx
                 
 def board_to_tensor(board):
-    tensor = np.zeros((17, 8, 8), dtype=np.float32) 
+    tensor = np.zeros((18, 8, 8), dtype=np.float32) 
     
     piece_to_channel = {
         chess.PAWN: 0,
@@ -129,6 +129,11 @@ def board_to_tensor(board):
         rank = board.ep_square // 8
         file = board.ep_square % 8
         tensor[16, rank, file] = 1.0
+        
+    if board.turn == chess.WHITE:
+        tensor[17, :, :] = 1.0  # All 1s if white to move
+    else:
+        tensor[17, :, :] = 0.0
     
     return tensor
 

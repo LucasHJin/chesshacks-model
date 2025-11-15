@@ -5,16 +5,85 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
 import json
 from tqdm import tqdm
-from model import ResidualBlock, ChessNet
+from pathlib import Path
+#from model import ResidualBlock, ChessNet
 
 app = modal.App("chess-training")
 
 image = modal.Image.debian_slim(python_version="3.11").pip_install(
-    "torch==2.1.0",
+    "torch",
     "tqdm",
+    "numpy"
 )
 
 volume = modal.Volume.from_name("chess-data", create_if_missing=True)
+
+class ResidualBlock(nn.Module):
+    """Residual block with skip connection"""
+    def __init__(self, channels):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(channels)
+    
+    def forward(self, x):
+        residual = x
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += residual  # Skip connection
+        return F.relu(out)
+
+
+class ChessNet(nn.Module):
+    """
+    Chess policy network
+    Input: (batch, 18, 8, 8)
+    Output: (batch, num_moves)
+    """
+    def __init__(self, num_moves=4272, num_blocks=7):
+        super().__init__()
+        
+        # Initial convolution
+        self.conv_input = nn.Conv2d(18, 128, kernel_size=3, padding=1)
+        self.bn_input = nn.BatchNorm2d(128)
+        
+        # Residual tower
+        self.residual_blocks = nn.ModuleList([
+            ResidualBlock(128) for _ in range(num_blocks)
+        ])
+        
+        # Policy head
+        self.policy_conv = nn.Conv2d(128, 32, kernel_size=1)
+        self.policy_bn = nn.BatchNorm2d(32)
+        self.policy_fc = nn.Linear(32 * 8 * 8, num_moves)
+        
+        # Optional: Value head (position evaluation)
+        self.value_conv = nn.Conv2d(128, 1, kernel_size=1)
+        self.value_bn = nn.BatchNorm2d(1)
+        self.value_fc1 = nn.Linear(8 * 8, 256)
+        self.value_fc2 = nn.Linear(256, 1)
+    
+    def forward(self, x):
+        # Input processing
+        x = F.relu(self.bn_input(self.conv_input(x)))
+        
+        # Residual tower
+        for block in self.residual_blocks:
+            x = block(x)
+        
+        # Policy head (move probabilities)
+        policy = F.relu(self.policy_bn(self.policy_conv(x)))
+        policy = policy.view(policy.size(0), -1)
+        policy = self.policy_fc(policy)
+        
+        # Value head (position evaluation) - optional
+        value = F.relu(self.value_bn(self.value_conv(x)))
+        value = value.view(value.size(0), -1)
+        value = F.relu(self.value_fc1(value))
+        value = torch.tanh(self.value_fc2(value))
+        
+        return policy, value
 
 class ChessDataset(Dataset):
     def __init__(self, data_path):
@@ -31,8 +100,8 @@ class ChessDataset(Dataset):
     
 @app.function(
     image=image,
-    gpu="A10G",
-    timeout=3600 * 10,  # 6 hours max
+    gpu="T4",
+    timeout=3600 * 10,  # 10 hours max
     volumes={"/data": volume}
 )
 def train_model(num_epochs=15, batch_size=256, lr=0.001, num_blocks=8):
@@ -58,7 +127,7 @@ def train_model(num_epochs=15, batch_size=256, lr=0.001, num_blocks=8):
     val_dataset = ChessDataset('/data/val_data.pt')
     
     print(f"Train size: {len(train_dataset):,}")
-    print(f"Val size: {len(train_dataset):,}")
+    print(f"Val size: {len(val_dataset):,}")
     
     # Create dataloaders
     train_loader = DataLoader(
@@ -194,11 +263,12 @@ def train_model(num_epochs=15, batch_size=256, lr=0.001, num_blocks=8):
 @app.function(image=image, volumes={"/data": volume})
 def upload_data():
     """Upload local data to Modal volume"""
-    import shutil
     
     print("Uploading data to Modal...")
-    shutil.copy('data/processed/train_data.pt', '/data/train_data.pt')
-    shutil.copy('data/processed/move_vocab.json', '/data/move_vocab.json')
+    base_dir = Path(__file__).parent
+    train_path = base_dir / 'data' / 'processed' / 'train_data.pt'
+    val_path = base_dir / 'data' / 'processed' / 'val_data.pt'
+    vocab_path = base_dir / 'data' / 'processed' / 'move_vocab.json'
     volume.commit()
     print("✓ Upload complete!")
 
@@ -218,17 +288,14 @@ def main():
     print("CHESS ENGINE TRAINING ON MODAL")
     print("="*60)
     
-    # Step 1: Upload data
-    print("\nStep 1: Uploading data...")
-    upload_data.remote()
+    # Files already uploaded via CLI - skip upload step
+    print("\nStarting training (files uploaded via CLI)...")
     
-    # Step 2: Train
-    print("\nStep 2: Training model...")
     results = train_model.remote(
         num_epochs=15,
         batch_size=256,
         lr=0.001,
-        num_blocks=8  # Adjust: more blocks = better but slower
+        num_blocks=8
     )
     
     print("\n" + "="*60)
@@ -238,8 +305,8 @@ def main():
     print(f"Final Train Acc: {results['final_train_acc']:.2f}%")
     print(f"Final Val Acc: {results['final_val_acc']:.2f}%")
     
-    # Step 3: Download model
-    print("\nStep 3: Downloading trained model...")
+    # Download model
+    print("\nDownloading model...")
     model_data = download_model.remote('model_best.pt')
     
     with open('model_best.pt', 'wb') as f:
