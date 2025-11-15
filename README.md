@@ -2,6 +2,7 @@ Strategy:
 - Get dataset
 - Build vocab (64x64 + promotions)
 - Stream process PGN (with filter)
+    - Downsample opening data
 - Store as (board tensor - 3d tensor, move index)
     - (17, 8, 8) -> shows entire board for each of the pieces (6 per side) + castleing / en passant
 - Augment data? (horizontal flip)
