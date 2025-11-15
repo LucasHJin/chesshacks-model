@@ -1,0 +1,13 @@
+Strategy:
+- Get dataset
+- Build vocab (64x64 + promotions)
+- Stream process PGN (with filter)
+- Store as (board tensor - 3d tensor, move index)
+    - (17, 8, 8) -> shows entire board for each of the pieces (6 per side) + castleing / en passant
+- Augment data? (horizontal flip)
+- Save each as big pytorch tensors
+- Architecture -> CNN (layers takes 3D, flattened at the end, output 4672 possible moves)
+- Train with PyTorch (dataloaders, dataset, adam optimizer, cross entropy loss)
+- Integrate with modal
+- Inference engine
+    - Get legal moves, choose highest probability, 
