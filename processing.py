@@ -146,6 +146,8 @@ def process_pgn(pgn_path, move_to_idx, max_positions=250000, opening_sample_rate
                     print("\nReached end of PGN file")
                     break
                 
+                game_id = game_count
+                
                 # Extract positions from this game
                 board = game.board()
                 move_num = 0
@@ -168,7 +170,7 @@ def process_pgn(pgn_path, move_to_idx, max_positions=250000, opening_sample_rate
                         move_idx = move_to_idx[move_uci]
                         
                         # Original position
-                        positions.append((board_tensor, move_idx))
+                        positions.append((board_tensor, move_idx, game_id))
                         pbar.update(1)
                         
                         # Horizontal flip augmentation
@@ -198,7 +200,7 @@ def process_pgn(pgn_path, move_to_idx, max_positions=250000, opening_sample_rate
                         
                         if flipped_uci in move_to_idx:
                             flipped_idx = move_to_idx[flipped_uci]
-                            positions.append((flipped_tensor, flipped_idx))
+                            positions.append((flipped_tensor, flipped_idx, game_id))
                             pbar.update(1)
                         
                         if len(positions) >= max_positions:
@@ -214,38 +216,45 @@ def process_pgn(pgn_path, move_to_idx, max_positions=250000, opening_sample_rate
     print(f"\n✓ Extracted {len(positions)} positions from {game_count} games")
     return positions
     
-def save_data(positions, move_to_idx, output_dir='data/processed'):
+def save_data(positions, move_to_idx, output_dir='data/processed', val_ratio=0.1, seed=42):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"Saving {len(positions)} positions...")
     
-    # Convert to tensors
-    boards = torch.stack([torch.FloatTensor(p[0]) for p in positions])
-    moves = torch.LongTensor([p[1] for p in positions])
+    # --- Split positions by game_id ---
+    random.seed(seed)
+    game_ids = list(set([p[2] for p in positions]))  # extract unique game IDs
+    random.shuffle(game_ids)
     
-    # Save training data
-    data_path = output_dir / 'train_data.pt'
-    torch.save({
-        'boards': boards, # (250000, 17, 8, 8)
-        'moves': moves,
-        'num_positions': len(positions)
-    }, data_path)
+    val_count = int(len(game_ids) * val_ratio)
+    val_game_ids = set(game_ids[:val_count])
     
-    print(f"✓ Saved training data: {data_path}")
-    print(f"  Size: {data_path.stat().st_size / 1e6:.1f} MB")
+    train_positions = [p for p in positions if p[2] not in val_game_ids]
+    val_positions = [p for p in positions if p[2] in val_game_ids]
     
-    # Save vocabulary
+    print(f"Training positions: {len(train_positions)}, Validation positions: {len(val_positions)}")
+    
+    # --- Convert to tensors and save ---
+    def save_positions(pos_list, filename):
+        boards = torch.stack([torch.FloatTensor(p[0]) for p in pos_list])
+        moves = torch.LongTensor([p[1] for p in pos_list])
+        torch.save({
+            'boards': boards,
+            'moves': moves,
+            'num_positions': len(pos_list)
+        }, output_dir / filename)
+        print(f"✓ Saved {filename}, size: {(output_dir / filename).stat().st_size / 1e6:.1f} MB")
+    
+    save_positions(train_positions, 'train_data.pt')
+    save_positions(val_positions, 'val_data.pt')
+    
+    # --- Save vocabulary ---
     vocab_path = output_dir / 'move_vocab.json'
     with open(vocab_path, 'w') as f:
-        json.dump({
-            'move_to_idx': move_to_idx,
-            'num_moves': len(move_to_idx)
-        }, f)
-    
-    print(f"✓ Saved vocabulary: {vocab_path}")
-    print(f"  Vocabulary size: {len(move_to_idx)} moves")
-    
+        json.dump({'move_to_idx': move_to_idx, 'num_moves': len(move_to_idx)}, f)
+    print(f"✓ Saved vocabulary: {vocab_path}, size: {len(move_to_idx)} moves")
+
 # TESTING
 def count_positions(pgn_path, opening_sample_rate=0.2):
     total_positions = 0
@@ -276,7 +285,7 @@ def count_positions(pgn_path, opening_sample_rate=0.2):
     return total_positions
 
 if __name__ == '__main__':
-    """vocab = build_vocabulary()
+    vocab = build_vocabulary()
     positions = process_pgn('data/raw/dataset.pgn', vocab, 2500000)
-    save_data(positions, vocab)"""
+    save_data(positions, vocab)
     
