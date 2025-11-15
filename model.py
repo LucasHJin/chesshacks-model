@@ -22,14 +22,14 @@ class ResidualBlock(nn.Module):
 class ChessNet(nn.Module):
     """
     Chess policy network
-    Input: (batch, 17, 8, 8)
+    Input: (batch, 18, 8, 8)
     Output: (batch, num_moves)
     """
     def __init__(self, num_moves=4272, num_blocks=7):
         super().__init__()
         
         # Initial convolution
-        self.conv_input = nn.Conv2d(17, 128, kernel_size=3, padding=1)
+        self.conv_input = nn.Conv2d(18, 128, kernel_size=3, padding=1)
         self.bn_input = nn.BatchNorm2d(128)
         
         # Residual tower

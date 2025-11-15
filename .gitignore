@@ -1,3 +1,4 @@
 training_venv/
 __pycache__/
 data/
+models/
