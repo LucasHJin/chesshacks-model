@@ -211,10 +211,6 @@ def download_model(filename='model_best.pt'):
     with open(model_path, 'rb') as f:
         return f.read()
 
-# ═══════════════════════════════════════════════════════
-# LOCAL ENTRYPOINT
-# ═══════════════════════════════════════════════════════
-
 @app.local_entrypoint()
 def main():
     """Run training pipeline"""
