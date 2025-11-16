@@ -7,7 +7,7 @@ api = HfApi()
 
 # Upload files
 api.upload_file(
-    path_or_fileobj="models/model_best.pt",
+    path_or_fileobj="models/model_best_simple.pt",
     path_in_repo="model_best.pt",
     repo_id="LucasHJ/chess-engine",
     repo_type="model",

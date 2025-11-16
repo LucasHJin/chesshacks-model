@@ -93,6 +93,18 @@ def build_vocabulary():
     print(f"After promotions: {len(move_to_idx)} total moves")
     
     return move_to_idx
+
+
+def get_move_sample_rate(move_num):
+    if move_num <= 4:
+        return 0.20
+    elif move_num <= 7:
+        return 0.50
+    elif move_num <= 10:
+        return 0.85
+    else:
+        return 1.0
+                
                 
 def board_to_tensor(board):
     tensor = np.zeros((18, 8, 8), dtype=np.float32) 
@@ -137,90 +149,123 @@ def board_to_tensor(board):
     
     return tensor
 
-def process_pgn(pgn_path, move_to_idx, max_positions=250000, opening_sample_rate = 0.2):
-    positions = []
+
+def process_pgn_files(pgn_paths, move_to_idx, max_positions=2500000):
+    """
+    Process multiple PGN files until max_positions is reached
     
-    with open(pgn_path, 'r', encoding='utf-8') as pgn_file:
-        game_count = 0
-        
-        with tqdm(total=max_positions, desc="Extracting positions") as pbar:
-            while len(positions) < max_positions:
-                game = chess.pgn.read_game(pgn_file)
-                
-                if game is None:
-                    print("\nReached end of PGN file")
-                    break
-                
-                game_id = game_count
-                
-                # Extract positions from this game
-                board = game.board()
-                move_num = 0
-                
-                for move in game.mainline_moves():
-                    move_num += 1
-                    
-                    # Downsample opening moves (first 5 moves)
-                    if move_num <= 5:
-                        if random.random() > opening_sample_rate:
+    Args:
+        pgn_paths: List of paths to PGN files
+        move_to_idx: Move vocabulary
+        max_positions: Maximum number of positions to extract
+    
+    Returns:
+        List of (board_tensor, move_idx, game_id) tuples
+    """
+    positions = []
+    game_count = 0
+    
+    # Create progress bar for total positions
+    with tqdm(total=max_positions, desc="Extracting positions") as pbar:
+        # Iterate through PGN files
+        for file_idx, pgn_path in enumerate(pgn_paths):
+            print(f"\n📁 Processing file {file_idx + 1}/{len(pgn_paths)}: {pgn_path}")
+            
+            try:
+                with open(pgn_path, 'r', encoding='utf-8') as pgn_file:
+                    while len(positions) < max_positions:
+                        game = chess.pgn.read_game(pgn_file)
+                        
+                        if game is None:
+                            print(f"  ✓ Finished file {pgn_path}")
+                            break  # End of this file
+                        
+                        game_id = game_count
+                        
+                        # Extract positions from this game
+                        board = game.board()
+                        move_num = 0
+                        
+                        for move in game.mainline_moves():
+                            move_num += 1
+                            
+                            # Get sampling rate for this move number
+                            sample_rate = get_move_sample_rate(move_num)
+                            
+                            # Skip based on sampling rate
+                            if random.random() > sample_rate:
+                                board.push(move)
+                                continue
+                            
+                            # Convert board to tensor
+                            board_tensor = board_to_tensor(board)
+                            move_uci = move.uci()
+                            
+                            # Check if move is in vocabulary
+                            if move_uci in move_to_idx:
+                                move_idx = move_to_idx[move_uci]
+                                
+                                # Original position
+                                positions.append((board_tensor, move_idx, game_id))
+                                pbar.update(1)
+                                
+                                # Horizontal flip augmentation
+                                flipped_tensor = np.flip(board_tensor, axis=2).copy()
+                                
+                                # Flip move coordinates
+                                from_square = move.from_square
+                                to_square = move.to_square
+                                
+                                from_file = from_square % 8
+                                from_rank = from_square // 8
+                                to_file = to_square % 8
+                                to_rank = to_square // 8
+                                
+                                # Flip files (a↔h, b↔g, etc.)
+                                flipped_from = from_rank * 8 + (7 - from_file)
+                                flipped_to = to_rank * 8 + (7 - to_file)
+                                
+                                flipped_move = chess.Move(flipped_from, flipped_to)
+                                
+                                # Handle promotions
+                                if move.promotion:
+                                    flipped_move = chess.Move(flipped_from, flipped_to, 
+                                                             promotion=move.promotion)
+                                
+                                flipped_uci = flipped_move.uci()
+                                
+                                if flipped_uci in move_to_idx:
+                                    flipped_idx = move_to_idx[flipped_uci]
+                                    positions.append((flipped_tensor, flipped_idx, game_id))
+                                    pbar.update(1)
+                                
+                                if len(positions) >= max_positions:
+                                    print(f"\n  ✓ Reached max positions!")
+                                    break
+                            
                             board.push(move)
-                            continue
-                    
-                    # Convert board to tensor
-                    board_tensor = board_to_tensor(board)
-                    move_uci = move.uci()
-                    
-                    # Check if move is in vocabulary
-                    if move_uci in move_to_idx:
-                        move_idx = move_to_idx[move_uci]
                         
-                        # Original position
-                        positions.append((board_tensor, move_idx, game_id))
-                        pbar.update(1)
+                        game_count += 1
                         
-                        # Horizontal flip augmentation
-                        flipped_tensor = np.flip(board_tensor, axis=2).copy()
-                        
-                        # Flip move coordinates
-                        from_square = move.from_square
-                        to_square = move.to_square
-                        
-                        from_file = from_square % 8
-                        from_rank = from_square // 8
-                        to_file = to_square % 8
-                        to_rank = to_square // 8
-                        
-                        # Flip files (a↔h, b↔g, etc.)
-                        flipped_from = from_rank * 8 + (7 - from_file)
-                        flipped_to = to_rank * 8 + (7 - to_file)
-                        
-                        flipped_move = chess.Move(flipped_from, flipped_to)
-                        
-                        # Handle promotions
-                        if move.promotion:
-                            flipped_move = chess.Move(flipped_from, flipped_to, 
-                                                     promotion=move.promotion)
-                        
-                        flipped_uci = flipped_move.uci()
-                        
-                        if flipped_uci in move_to_idx:
-                            flipped_idx = move_to_idx[flipped_uci]
-                            positions.append((flipped_tensor, flipped_idx, game_id))
-                            pbar.update(1)
+                        if game_count % 1000 == 0:
+                            print(f"\n  📊 Processed {game_count} games, {len(positions)} positions")
                         
                         if len(positions) >= max_positions:
                             break
-                    
-                    board.push(move)
                 
-                game_count += 1
-                
-                if game_count % 100 == 0:
-                    print(f"\nProcessed {game_count} games, {len(positions)} positions")
+            except Exception as e:
+                print(f"  ⚠️ Error processing {pgn_path}: {e}")
+                continue
+            
+            # Check if we've reached max positions
+            if len(positions) >= max_positions:
+                print(f"\n✓ Reached target of {max_positions} positions!")
+                break
     
-    print(f"\n✓ Extracted {len(positions)} positions from {game_count} games")
+    print(f"\n✓ Extracted {len(positions)} positions from {game_count} games across {file_idx + 1} files") # type: ignore
     return positions
-    
+
+
 def save_data(positions, move_to_idx, output_dir='data/processed', val_ratio=0.1, seed=42):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -260,37 +305,24 @@ def save_data(positions, move_to_idx, output_dir='data/processed', val_ratio=0.1
         json.dump({'move_to_idx': move_to_idx, 'num_moves': len(move_to_idx)}, f)
     print(f"✓ Saved vocabulary: {vocab_path}, size: {len(move_to_idx)} moves")
 
-# TESTING
-def count_positions(pgn_path, opening_sample_rate=0.2):
-    total_positions = 0
-    game_count = 0
-
-    with open(pgn_path, 'r', encoding='utf-8') as pgn_file:
-        while True:
-            game = chess.pgn.read_game(pgn_file)
-            if game is None:
-                break
-
-            board = game.board()
-            move_num = 0
-            for move in game.mainline_moves():
-                move_num += 1
-
-                # Optionally downsample first 5 opening moves
-                if move_num <= 5 and random.random() > opening_sample_rate:
-                    board.push(move)
-                    continue
-
-                total_positions += 1
-                board.push(move)
-
-            game_count += 1
-
-    print(f"Processed {game_count} games, found {total_positions} positions")
-    return total_positions
 
 if __name__ == '__main__':
+    # Build vocabulary
     vocab = build_vocabulary()
-    positions = process_pgn('data/raw/dataset.pgn', vocab, 2500000)
-    save_data(positions, vocab)
     
+    # List of PGN files to process
+    pgn_files = [
+        'data/raw/dataset1.pgn',
+        'data/raw/dataset2.pgn',
+        'data/raw/dataset3.pgn',
+        'data/raw/dataset4.pgn',
+    ]
+    
+    # Or automatically find all PGN files in a directory
+    # pgn_files = list(Path('data/raw').glob('*.pgn'))
+    
+    # Process multiple files
+    positions = process_pgn_files(pgn_files, vocab, max_positions=6000000)
+    
+    # Save processed data
+    save_data(positions, vocab)

@@ -1,15 +1,20 @@
 # test_model.py
 import torch
-from model_training import ChessNet
+from model_training import ChessNet  # Make sure this imports your class
 
 # Create model
-model = ChessNet(num_moves=4272, num_blocks=8)
+num_moves = 4272
+model = ChessNet(num_moves=num_moves, num_blocks=8)
 
 # Test forward pass
-test_input = torch.randn(4, 17, 8, 8)  # Batch of 4
-policy, value = model(test_input)
+batch_size = 4
+channels = 18  # your ChessNet expects 18 channels, not 17
+board_size = 8
+test_input = torch.randn(batch_size, channels, board_size, board_size)
+
+# Forward
+policy_output = model(test_input)  # returns only policy
 
 print(f"Input shape: {test_input.shape}")
-print(f"Policy output: {policy.shape}")  # Should be (4, 4272)
-print(f"Value output: {value.shape}")    # Should be (4, 1)
-print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+print(f"Policy output shape: {policy_output.shape}")  # Should be (4, 4272)
+print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")

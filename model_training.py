@@ -2,7 +2,7 @@ import modal
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 import json
 from tqdm import tqdm
 from pathlib import Path
@@ -16,74 +16,86 @@ image = modal.Image.debian_slim(python_version="3.11").pip_install(
     "numpy"
 )
 
-volume = modal.Volume.from_name("chess-data", create_if_missing=True)
+volume = modal.Volume.from_name("chess-data-v2", create_if_missing=True)
 
-class ResidualBlock(nn.Module):
-    """Residual block with skip connection"""
-    def __init__(self, channels):
+class SEBlock(nn.Module):
+    """Squeeze-and-Excitation: Channel attention mechanism"""
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.fc1 = nn.Linear(channels, channels // reduction)
+        self.fc2 = nn.Linear(channels // reduction, channels)
+    
+    def forward(self, x):
+        B, C, _, _ = x.size()
+        # Global average pooling
+        squeeze = x.view(B, C, -1).mean(dim=2)
+        # Channel attention
+        excitation = torch.sigmoid(self.fc2(F.relu(self.fc1(squeeze))))
+        return x * excitation.view(B, C, 1, 1)
+
+
+class ImprovedResidualBlock(nn.Module):
+    """Residual block with SE attention and dropout"""
+    def __init__(self, channels, dropout=0.1):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(channels)
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(channels)
+        self.se = SEBlock(channels)  # ✅ Attention
+        self.dropout = nn.Dropout2d(dropout)  # ✅ Regularization
     
     def forward(self, x):
         residual = x
         out = F.relu(self.bn1(self.conv1(x)))
+        out = self.dropout(out)
         out = self.bn2(self.conv2(out))
-        out += residual  # Skip connection
+        out = self.se(out)  # Apply channel attention
+        out += residual
         return F.relu(out)
 
 
 class ChessNet(nn.Module):
     """
-    Chess policy network
-    Input: (batch, 18, 8, 8)
-    Output: (batch, num_moves)
+    Improved chess network with:
+    - SE blocks for better feature learning
+    - Deeper and wider architecture
+    - Better regularization
     """
-    def __init__(self, num_moves=4272, num_blocks=7):
+    def __init__(self, num_moves=4272, num_blocks=10, channels=256, dropout=0.15):
         super().__init__()
         
-        # Initial convolution
-        self.conv_input = nn.Conv2d(18, 128, kernel_size=3, padding=1)
-        self.bn_input = nn.BatchNorm2d(128)
+        # Wider initial convolution (18 → 256 channels)
+        self.conv_input = nn.Conv2d(18, channels, kernel_size=3, padding=1)
+        self.bn_input = nn.BatchNorm2d(channels)
         
-        # Residual tower
+        # Deeper residual tower (12 blocks instead of 8)
         self.residual_blocks = nn.ModuleList([
-            ResidualBlock(128) for _ in range(num_blocks)
+            ImprovedResidualBlock(channels, dropout) for _ in range(num_blocks)
         ])
         
-        # Policy head
-        self.policy_conv = nn.Conv2d(128, 32, kernel_size=1)
-        self.policy_bn = nn.BatchNorm2d(32)
-        self.policy_fc = nn.Linear(32 * 8 * 8, num_moves)
+        # Improved policy head (move prediction)
+        self.policy_conv = nn.Conv2d(channels, 64, kernel_size=1)
+        self.policy_bn = nn.BatchNorm2d(64)
+        self.policy_fc = nn.Linear(64 * 8 * 8, num_moves)
+        self.policy_dropout = nn.Dropout(dropout)
         
-        # Optional: Value head (position evaluation)
-        self.value_conv = nn.Conv2d(128, 1, kernel_size=1)
-        self.value_bn = nn.BatchNorm2d(1)
-        self.value_fc1 = nn.Linear(8 * 8, 256)
-        self.value_fc2 = nn.Linear(256, 1)
     
     def forward(self, x):
         # Input processing
         x = F.relu(self.bn_input(self.conv_input(x)))
         
-        # Residual tower
+        # Residual tower with attention
         for block in self.residual_blocks:
             x = block(x)
         
-        # Policy head (move probabilities)
+        # Policy head (which move to play)
         policy = F.relu(self.policy_bn(self.policy_conv(x)))
         policy = policy.view(policy.size(0), -1)
+        policy = self.policy_dropout(policy)
         policy = self.policy_fc(policy)
         
-        # Value head (position evaluation) - optional
-        value = F.relu(self.value_bn(self.value_conv(x)))
-        value = value.view(value.size(0), -1)
-        value = F.relu(self.value_fc1(value))
-        value = torch.tanh(self.value_fc2(value))
-        
-        return policy, value
+        return policy
 
 class ChessDataset(Dataset):
     def __init__(self, data_path):
@@ -100,11 +112,12 @@ class ChessDataset(Dataset):
     
 @app.function(
     image=image,
-    gpu="T4",
+    gpu="L4",
     timeout=3600 * 10,  # 10 hours max
-    volumes={"/data": volume}
+    volumes={"/data": volume},
+    retries=3
 )
-def train_model(num_epochs=15, batch_size=256, lr=0.001, num_blocks=8):
+def train_model(num_epochs=12, batch_size=256, lr=0.001, num_blocks=8):
     """Train chess model on Modal GPU"""
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -117,10 +130,6 @@ def train_model(num_epochs=15, batch_size=256, lr=0.001, num_blocks=8):
         vocab = json.load(f)
     num_moves = vocab['num_moves']
     print(f"Vocabulary size: {num_moves} moves")
-    
-    # Load dataset
-    print("\nLoading dataset...")
-    dataset = ChessDataset('/data/train_data.pt')
     
     # Split train/val
     train_dataset = ChessDataset('/data/train_data.pt')
@@ -181,7 +190,7 @@ def train_model(num_epochs=15, batch_size=256, lr=0.001, num_blocks=8):
             boards, moves = boards.to(device), moves.to(device)
             
             optimizer.zero_grad()
-            policy, value = model(boards)
+            policy = model(boards)
             loss = criterion(policy, moves)
             loss.backward()
             optimizer.step()
@@ -203,7 +212,7 @@ def train_model(num_epochs=15, batch_size=256, lr=0.001, num_blocks=8):
         with torch.no_grad():
             for boards, moves in tqdm(val_loader, desc="Validating"):
                 boards, moves = boards.to(device), moves.to(device)
-                policy, value = model(boards)
+                policy = model(boards)
                 loss = criterion(policy, moves)
                 
                 val_loss += loss.item()
@@ -229,18 +238,17 @@ def train_model(num_epochs=15, batch_size=256, lr=0.001, num_blocks=8):
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': avg_val_loss,
                 'val_acc': val_acc,
-            }, '/data/model_best.pt')
+            }, '/data/model_best_full.pt')
+            torch.save(model.state_dict(), '/data/model_best_simple.pt')
             print(f"✓ Saved best model (val_loss: {avg_val_loss:.4f})")
             volume.commit()  # Persist to volume
         
-        # Save checkpoint
-        if (epoch + 1) % 5 == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-            }, f'/data/model_epoch_{epoch+1}.pt')
-            volume.commit()
-    
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+        }, f'/data/model_epoch_{epoch+1}.pt')
+        volume.commit()
+
     # Save final model
     torch.save(model.state_dict(), '/data/model_final.pt')
     volume.commit()
@@ -292,10 +300,10 @@ def main():
     print("\nStarting training (files uploaded via CLI)...")
     
     results = train_model.remote(
-        num_epochs=15,
+        num_epochs=11,
         batch_size=256,
         lr=0.001,
-        num_blocks=8
+        num_blocks=10
     )
     
     print("\n" + "="*60)

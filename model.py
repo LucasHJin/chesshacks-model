@@ -2,69 +2,81 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class ResidualBlock(nn.Module):
-    """Residual block with skip connection"""
-    def __init__(self, channels):
+class SEBlock(nn.Module):
+    """Squeeze-and-Excitation: Channel attention mechanism"""
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.fc1 = nn.Linear(channels, channels // reduction)
+        self.fc2 = nn.Linear(channels // reduction, channels)
+    
+    def forward(self, x):
+        B, C, _, _ = x.size()
+        # Global average pooling
+        squeeze = x.view(B, C, -1).mean(dim=2)
+        # Channel attention
+        excitation = torch.sigmoid(self.fc2(F.relu(self.fc1(squeeze))))
+        return x * excitation.view(B, C, 1, 1)
+
+
+class ImprovedResidualBlock(nn.Module):
+    """Residual block with SE attention and dropout"""
+    def __init__(self, channels, dropout=0.1):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(channels)
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(channels)
+        self.se = SEBlock(channels)  # ✅ Attention
+        self.dropout = nn.Dropout2d(dropout)  # ✅ Regularization
     
     def forward(self, x):
         residual = x
         out = F.relu(self.bn1(self.conv1(x)))
+        out = self.dropout(out)
         out = self.bn2(self.conv2(out))
-        out += residual  # Skip connection
+        out = self.se(out)  # Apply channel attention
+        out += residual
         return F.relu(out)
 
 
 class ChessNet(nn.Module):
     """
-    Chess policy network
-    Input: (batch, 18, 8, 8)
-    Output: (batch, num_moves)
+    Improved chess network with:
+    - SE blocks for better feature learning
+    - Deeper and wider architecture
+    - Better regularization
     """
-    def __init__(self, num_moves=4272, num_blocks=7):
+    def __init__(self, num_moves=4272, num_blocks=10, channels=256, dropout=0.15):
         super().__init__()
         
-        # Initial convolution
-        self.conv_input = nn.Conv2d(18, 128, kernel_size=3, padding=1)
-        self.bn_input = nn.BatchNorm2d(128)
+        # Wider initial convolution (18 → 256 channels)
+        self.conv_input = nn.Conv2d(18, channels, kernel_size=3, padding=1)
+        self.bn_input = nn.BatchNorm2d(channels)
         
-        # Residual tower
+        # Deeper residual tower (12 blocks instead of 8)
         self.residual_blocks = nn.ModuleList([
-            ResidualBlock(128) for _ in range(num_blocks)
+            ImprovedResidualBlock(channels, dropout) for _ in range(num_blocks)
         ])
         
-        # Policy head
-        self.policy_conv = nn.Conv2d(128, 32, kernel_size=1)
-        self.policy_bn = nn.BatchNorm2d(32)
-        self.policy_fc = nn.Linear(32 * 8 * 8, num_moves)
+        # Improved policy head (move prediction)
+        self.policy_conv = nn.Conv2d(channels, 64, kernel_size=1)
+        self.policy_bn = nn.BatchNorm2d(64)
+        self.policy_fc = nn.Linear(64 * 8 * 8, num_moves)
+        self.policy_dropout = nn.Dropout(dropout)
         
-        # Optional: Value head (position evaluation)
-        self.value_conv = nn.Conv2d(128, 1, kernel_size=1)
-        self.value_bn = nn.BatchNorm2d(1)
-        self.value_fc1 = nn.Linear(8 * 8, 256)
-        self.value_fc2 = nn.Linear(256, 1)
     
     def forward(self, x):
         # Input processing
         x = F.relu(self.bn_input(self.conv_input(x)))
         
-        # Residual tower
+        # Residual tower with attention
         for block in self.residual_blocks:
             x = block(x)
         
-        # Policy head (move probabilities)
+        # Policy head (which move to play)
         policy = F.relu(self.policy_bn(self.policy_conv(x)))
         policy = policy.view(policy.size(0), -1)
+        policy = self.policy_dropout(policy)
         policy = self.policy_fc(policy)
         
-        # Value head (position evaluation) - optional
-        value = F.relu(self.value_bn(self.value_conv(x)))
-        value = value.view(value.size(0), -1)
-        value = F.relu(self.value_fc1(value))
-        value = torch.tanh(self.value_fc2(value))
-        
-        return policy, value
+        return policy
